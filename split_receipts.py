@@ -105,8 +105,13 @@ class ReceiptSplitter:
         for idx in range(total_pages):
             page_no = idx + 1
             page = reader.pages[idx]
-            page_width = float(page.mediabox.width)
-            page_height = float(page.mediabox.height)
+            rotation = int(page.get("/Rotate") or 0) % 360
+            base_width = float(page.mediabox.width)
+            base_height = float(page.mediabox.height)
+            if rotation in (90, 270):
+                page_width, page_height = base_height, base_width
+            else:
+                page_width, page_height = base_width, base_height
 
             pixmap = self._render_page(doc, idx)
             boxes = self._detect_image_boxes(pixmap)
@@ -121,7 +126,16 @@ class ReceiptSplitter:
 
             img_width, img_height = pixmap.width, pixmap.height
             page_boxes = [
-                self._image_box_to_pdf_box(box, page_width, page_height, img_width, img_height)
+                self._image_box_to_pdf_box(
+                    box,
+                    rotation,
+                    base_width,
+                    base_height,
+                    page_width,
+                    page_height,
+                    img_width,
+                    img_height,
+                )
                 for box in boxes
             ]
 
@@ -323,16 +337,52 @@ class ReceiptSplitter:
     def _image_box_to_pdf_box(
         self,
         box: ImageBox,
+        rotation: int,
+        base_width: float,
+        base_height: float,
         page_width: float,
         page_height: float,
         img_width: int,
         img_height: int,
     ) -> PdfBox:
-        left = (box.left / img_width) * page_width
-        right = (box.right / img_width) * page_width
-        top = page_height - (box.top / img_height) * page_height
-        bottom = page_height - (box.bottom / img_height) * page_height
+        rot_left = (box.left / img_width) * page_width
+        rot_right = (box.right / img_width) * page_width
+        rot_top = page_height - (box.top / img_height) * page_height
+        rot_bottom = page_height - (box.bottom / img_height) * page_height
+
+        corners_rot = [
+            (rot_left, rot_bottom),
+            (rot_left, rot_top),
+            (rot_right, rot_bottom),
+            (rot_right, rot_top),
+        ]
+        corners_pdf = [
+            self._map_rotated_point_to_pdf(x, y, rotation, base_width, base_height)
+            for x, y in corners_rot
+        ]
+        xs = [pt[0] for pt in corners_pdf]
+        ys = [pt[1] for pt in corners_pdf]
+        left, right = min(xs), max(xs)
+        bottom, top = min(ys), max(ys)
         return PdfBox(left, bottom, right, top)
+
+    @staticmethod
+    def _map_rotated_point_to_pdf(
+        x_rot: float,
+        y_rot: float,
+        rotation: int,
+        base_width: float,
+        base_height: float,
+    ) -> Tuple[float, float]:
+        if rotation == 0:
+            return x_rot, y_rot
+        if rotation == 90:
+            return y_rot, base_height - x_rot
+        if rotation == 180:
+            return base_width - x_rot, base_height - y_rot
+        if rotation == 270:
+            return base_width - y_rot, x_rot
+        raise ValueError(f"不支持的页面旋转角度: {rotation}")
 
     def _save_full_page(self, reader: PdfReader, page_index: int, output_path: Path) -> None:
         writer = PdfWriter()
