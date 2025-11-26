@@ -80,6 +80,7 @@ class ReceiptSplitter:
         min_row_height_ratio: float = 0.18,
         min_col_width_ratio: float = 0.35,
         min_region_fill: float = 0.005,
+        padding: float = 12.0,
     ) -> None:
         self.pdf_path = pdf_path
         self.output_dir = output_dir
@@ -91,6 +92,7 @@ class ReceiptSplitter:
         self.min_row_height_ratio = min_row_height_ratio
         self.min_col_width_ratio = min_col_width_ratio
         self.min_region_fill = min_region_fill
+        self.padding = padding
 
     def run(self) -> None:
         reader = PdfReader(self.pdf_path)
@@ -101,6 +103,7 @@ class ReceiptSplitter:
 
         export_count = 0
         doc = fitz.open(str(self.pdf_path))
+        merged_writer = PdfWriter()
 
         for idx in range(total_pages):
             page_no = idx + 1
@@ -120,40 +123,45 @@ class ReceiptSplitter:
 
             if len(boxes) <= 1:
                 export_count += 1
-                output_path = self.output_dir / f"page-{page_no:02d}-receipt-{export_count:03d}.pdf"
-                self._save_full_page(reader, idx, output_path)
+                print(f"  -> 添加完整页面到合并文件（票据 #{export_count}）")
+                self._add_full_page_to_writer(reader, idx, merged_writer)
                 continue
 
             img_width, img_height = pixmap.width, pixmap.height
             page_boxes = [
-                self._image_box_to_pdf_box(
-                    box,
-                    rotation,
-                    base_width,
-                    base_height,
+                self._expand_pdf_box(
+                    self._image_box_to_pdf_box(
+                        box,
+                        rotation,
+                        base_width,
+                        base_height,
+                        page_width,
+                        page_height,
+                        img_width,
+                        img_height,
+                    ),
                     page_width,
                     page_height,
-                    img_width,
-                    img_height,
                 )
                 for box in boxes
             ]
 
             for part_index, pdf_box in enumerate(page_boxes, start=1):
                 export_count += 1
-                output_path = self.output_dir / (
-                    f"page-{page_no:02d}-part-{part_index:02d}-receipt-{export_count:03d}.pdf"
-                )
                 print(
-                    "  -> 导出分块",
-                    f"{part_index}/{len(page_boxes)}",
-                    f"尺寸 {pdf_box.width:.2f} x {pdf_box.height:.2f}",
-                    f"保存到 {output_path.name}",
+                    f"  -> 添加分块 {part_index}/{len(page_boxes)} "
+                    f"到合并文件（票据 #{export_count}），"
+                    f"尺寸 {pdf_box.width:.2f} x {pdf_box.height:.2f}"
                 )
-                self._save_cropped_page(reader, idx, pdf_box, output_path)
+                self._add_cropped_page_to_writer(reader, idx, pdf_box, merged_writer)
+
+        output_filename = self.pdf_path.stem + "_receipts.pdf"
+        output_path = self.output_dir / output_filename
+        with output_path.open("wb") as fh:
+            merged_writer.write(fh)
 
         doc.close()
-        print(f"完成！输出目录：{self.output_dir}")
+        print(f"完成！共导出 {export_count} 个票据到：{output_path}")
 
     def _render_page(self, doc: fitz.Document, page_index: int) -> fitz.Pixmap:
         page = doc[page_index]
@@ -356,18 +364,29 @@ class ReceiptSplitter:
         top = max(rot_bottom, rot_top)
         return PdfBox(left, bottom, right, top)
 
-    def _save_full_page(self, reader: PdfReader, page_index: int, output_path: Path) -> None:
-        writer = PdfWriter()
-        writer.add_page(copy.deepcopy(reader.pages[page_index]))
-        with output_path.open("wb") as fh:
-            writer.write(fh)
+    def _expand_pdf_box(
+        self, pdf_box: PdfBox, page_width: float, page_height: float
+    ) -> PdfBox:
+        if self.padding <= 0:
+            return pdf_box
 
-    def _save_cropped_page(
+        left = max(0, pdf_box.left - self.padding)
+        bottom = max(0, pdf_box.bottom - self.padding)
+        right = min(page_width, pdf_box.right + self.padding)
+        top = min(page_height, pdf_box.top + self.padding)
+        return PdfBox(left, bottom, right, top)
+
+    def _add_full_page_to_writer(
+        self, reader: PdfReader, page_index: int, writer: PdfWriter
+    ) -> None:
+        writer.add_page(copy.deepcopy(reader.pages[page_index]))
+
+    def _add_cropped_page_to_writer(
         self,
         reader: PdfReader,
         page_index: int,
         pdf_box: PdfBox,
-        output_path: Path,
+        writer: PdfWriter,
     ) -> None:
         page = copy.deepcopy(reader.pages[page_index])
         rotation = int(page.get("/Rotate") or 0) % 360
@@ -400,10 +419,7 @@ class ReceiptSplitter:
         page.trimbox = box_rect
         page.artbox = box_rect
 
-        writer = PdfWriter()
         writer.add_page(page)
-        with output_path.open("wb") as fh:
-            writer.write(fh)
 
 
 def parse_args() -> argparse.Namespace:
@@ -417,6 +433,12 @@ def parse_args() -> argparse.Namespace:
         help="输出目录（默认为 ./output）",
     )
     parser.add_argument("--dpi", type=int, default=300, help="渲染 PDF 时使用的 DPI")
+    parser.add_argument(
+        "--padding",
+        type=float,
+        default=12.0,
+        help="裁剪区域向外扩展的边距（单位 pt，默认 12）",
+    )
     return parser.parse_args()
 
 
@@ -425,7 +447,9 @@ def main() -> None:
     if not args.pdf.exists():
         raise FileNotFoundError(f"未找到 PDF 文件：{args.pdf}")
 
-    splitter = ReceiptSplitter(pdf_path=args.pdf, output_dir=args.output, dpi=args.dpi)
+    splitter = ReceiptSplitter(
+        pdf_path=args.pdf, output_dir=args.output, dpi=args.dpi, padding=args.padding
+    )
     splitter.run()
 
 
