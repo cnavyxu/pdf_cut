@@ -27,7 +27,7 @@ except ImportError:
     exit(1)
 
 from PyPDF2 import PdfReader, PdfWriter, Transformation
-from PyPDF2.generic import RectangleObject
+from PyPDF2.generic import NameObject, NumberObject, RectangleObject
 
 
 @dataclass
@@ -350,39 +350,11 @@ class ReceiptSplitter:
         rot_top = page_height - (box.top / img_height) * page_height
         rot_bottom = page_height - (box.bottom / img_height) * page_height
 
-        corners_rot = [
-            (rot_left, rot_bottom),
-            (rot_left, rot_top),
-            (rot_right, rot_bottom),
-            (rot_right, rot_top),
-        ]
-        corners_pdf = [
-            self._map_rotated_point_to_pdf(x, y, rotation, base_width, base_height)
-            for x, y in corners_rot
-        ]
-        xs = [pt[0] for pt in corners_pdf]
-        ys = [pt[1] for pt in corners_pdf]
-        left, right = min(xs), max(xs)
-        bottom, top = min(ys), max(ys)
+        left = min(rot_left, rot_right)
+        right = max(rot_left, rot_right)
+        bottom = min(rot_bottom, rot_top)
+        top = max(rot_bottom, rot_top)
         return PdfBox(left, bottom, right, top)
-
-    @staticmethod
-    def _map_rotated_point_to_pdf(
-        x_rot: float,
-        y_rot: float,
-        rotation: int,
-        base_width: float,
-        base_height: float,
-    ) -> Tuple[float, float]:
-        if rotation == 0:
-            return x_rot, y_rot
-        if rotation == 90:
-            return y_rot, base_height - x_rot
-        if rotation == 180:
-            return base_width - x_rot, base_height - y_rot
-        if rotation == 270:
-            return base_width - y_rot, x_rot
-        raise ValueError(f"不支持的页面旋转角度: {rotation}")
 
     def _save_full_page(self, reader: PdfReader, page_index: int, output_path: Path) -> None:
         writer = PdfWriter()
@@ -398,6 +370,27 @@ class ReceiptSplitter:
         output_path: Path,
     ) -> None:
         page = copy.deepcopy(reader.pages[page_index])
+        rotation = int(page.get("/Rotate") or 0) % 360
+        
+        if rotation != 0:
+            base_width = float(page.mediabox.width)
+            base_height = float(page.mediabox.height)
+            
+            page[NameObject("/Rotate")] = NumberObject(0)
+            
+            if rotation == 90:
+                page.mediabox = RectangleObject([0, 0, base_height, base_width])
+                transformation = Transformation().rotate(-90).translate(0, base_width)
+                page.add_transformation(transformation)
+            elif rotation == 180:
+                page.mediabox = RectangleObject([0, 0, base_width, base_height])
+                transformation = Transformation().rotate(-180).translate(base_width, base_height)
+                page.add_transformation(transformation)
+            elif rotation == 270:
+                page.mediabox = RectangleObject([0, 0, base_height, base_width])
+                transformation = Transformation().rotate(-270).translate(base_height, 0)
+                page.add_transformation(transformation)
+        
         transformation = Transformation().translate(-pdf_box.left, -pdf_box.bottom)
         page.add_transformation(transformation)
 
